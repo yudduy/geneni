@@ -1,34 +1,44 @@
 import requests
 import pandas as pd
-from llm_agents.tools.base import ToolInterface
+from llm_agents.tools.toolinterface import ToolInterface
 import os
+from pathlib import Path
+from pydantic import BaseModel, ConfigDict
 
 class GeneToDisease(ToolInterface):
     name: str = "GeneToDisease"
     description: str = (
-        "Use this tool to get the disease associated with a given gene. The databse for this tool is limited, so if you do not find the gene you were looking for in the file, then act as if you never called this tool. Returns a dictionary with the gene as the key, and the value as a list of all the diseases associated with that gene."
+        "Use this tool to get the disease associated with a given gene. "
+        "Returns a dictionary with the gene as the key, and the value as a list of diseases. "
         "Input: MUST be a valid gene (e.g. BRCA1)."
     )
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    project_root: Path = None
+    database_path: str = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Initialize paths after parent initialization
+        self.project_root = Path(__file__).parent.parent.parent
+        self.database_path = os.path.join(self.project_root, "llm_agents", "tools", "human_disease_database.tsv")
 
     def use(self, input_text: str) -> dict:
-        gene = input_text.strip().strip("`").upper()  # Convert input gene to uppercase
-        file_path = "/home/groups/mbernst/cs197_data/experiment-data-llm/llm_agents/llm_agents/tools/human_disease_knowledge_filtered.tsv"
+        gene = input_text.strip().strip("`").upper()
 
-        # Check if the file exists
-        if not os.path.exists(file_path):
-            print(f"File does not exist: {file_path}")
+        if not os.path.exists(self.database_path):
+            print(f"Database file not found at: {self.database_path}")
             return {}
 
         try:
-            df = pd.read_csv(file_path, sep='\t', header=None, names=['Column1', 'Gene', 'Column3', 'Disease', 'Column5', 'Column6', 'Column7'])
-            print("File read successfully.")  # Debugging statement
-            print(df.head())  # Print the first few rows of the DataFrame
+            df = pd.read_csv(self.database_path, sep='\t', 
+                           header=None, 
+                           names=['Column1', 'Gene', 'Column3', 'Disease', 'Column5', 'Column6', 'Column7'])
+            
+            df['Gene'] = df['Gene'].str.upper()
+            filtered_df = df[df['Gene'] == gene]
+            diseases = filtered_df['Disease'].unique().tolist()
+            return {gene: diseases}
         except Exception as e:
-            print(f"Failed to read file: {e}")
+            print(f"Failed to read database: {e}")
             return {}
-
-        df['Gene'] = df['Gene'].str.upper()
-        filtered_df = df[df['Gene'] == gene]
-        print(filtered_df)  # Print the filtered DataFrame
-        diseases = filtered_df['Disease'].unique().tolist()
-        return {gene: diseases}

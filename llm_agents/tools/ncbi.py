@@ -1,30 +1,98 @@
+from pydantic import BaseModel, ConfigDict
 import requests
-import ToolInterface
+from typing import Dict, Any, Optional
+from llm_agents.tools.toolinterface import ToolInterface
 
 class NCBITool(ToolInterface):
-    # Example: Retrieve information about the BRCA1 gene from NCBI Gene database
-    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    params = {
-        "db": "gene",
-        "term": "BRCA1[gene]",
-        "retmode": "json"
-    }
+    """Tool for interacting with NCBI APIs."""
+    
+    name: str = "NCBITool"
+    description: str = "Tool for querying NCBI databases for gene and SNP information"
+    base_url: str = 'https://api.ncbi.nlm.nih.gov'
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (compatible; GeneniBot/1.0)',
+        })
 
-    response = requests.get(base_url, params=params)
-    data = response.json()
+    def search_gene(self, gene_symbol: str) -> Dict[str, Any]:
+        """Search for gene information."""
+        try:
+            search_params = {
+                "db": "gene",
+                "term": f"{gene_symbol}[Gene Name] AND human[Organism]",
+                "retmode": "json"
+            }
+            
+            response = self._session.get(f"{self.base_url}/esearch.fcgi", params=search_params)
+            response.raise_for_status()
+            search_data = response.json()
+            
+            if not search_data['esearchresult'].get('idlist'):
+                return {"error": f"No gene found for symbol: {gene_symbol}"}
+            
+            gene_id = search_data['esearchresult']['idlist'][0]
+            
+            summary_params = {
+                "db": "gene",
+                "id": gene_id,
+                "retmode": "json"
+            }
+            
+            response = self._session.get(f"{self.base_url}/esummary.fcgi", params=summary_params)
+            response.raise_for_status()
+            
+            return {"result": response.json()}
+            
+        except Exception as e:
+            return {"error": f"NCBI API request failed: {str(e)}"}
 
-    # Extract gene ID
-    gene_id = data['esearchresult']['idlist'][0]
+    def search_snp(self, rs_id: str) -> Dict[str, Any]:
+        """Search for SNP information."""
+        try:
+            search_params = {
+                "db": "snp",
+                "term": f"{rs_id}[RS]",
+                "retmode": "json"
+            }
+            
+            response = self._session.get(f"{self.base_url}/esearch.fcgi", params=search_params)
+            response.raise_for_status()
+            search_data = response.json()
+            
+            if not search_data['esearchresult'].get('idlist'):
+                return {"error": f"No SNP found for: {rs_id}"}
+            
+            snp_id = search_data['esearchresult']['idlist'][0]
+            
+            summary_params = {
+                "db": "snp",
+                "id": snp_id,
+                "retmode": "json"
+            }
+            
+            response = self._session.get(f"{self.base_url}/esummary.fcgi", params=summary_params)
+            response.raise_for_status()
+            
+            return {"result": response.json()}
+            
+        except Exception as e:
+            return {"error": f"NCBI API request failed: {str(e)}"}
 
-    # Retrieve detailed gene information
-    summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    summary_params = {
-        "db": "gene",
-        "id": gene_id,
-        "retmode": "json"
-    }
+    def use(self, input_text: str) -> Dict[str, Any]:
+        """Main interface for the tool."""
+        query = input_text.strip().upper()
+        
+        if query.startswith('RS'):
+            return self.search_snp(query)
+        else:
+            return self.search_gene(query)
 
-    summary_response = requests.get(summary_url, summary_params)
-    gene_info = summary_response.json()
-
-    return(gene_info)
+if __name__ == '__main__':
+    tool = NCBITool()
+    result = tool.use("BRCA1")
+    print(result)

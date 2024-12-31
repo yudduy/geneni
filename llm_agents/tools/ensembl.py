@@ -1,132 +1,91 @@
+"""
+Ensembl REST API client for retrieving gene and variant information.
+"""
+
 import sys
 import json
 import time
-
-# Python 2/3 adaptability
-try:
-    from urllib.parse import urlparse, urlencode
-    from urllib.request import urlopen, Request
-    from urllib.error import HTTPError
-except ImportError:
-    from urlparse import urlparse
-    from urllib import urlencode
-    from urllib2 import urlopen, Request, HTTPError
-
 import requests
-from llm_agents.tools.base import ToolInterface
+from typing import Dict, Any, Optional
+from llm_agents.tools.toolinterface import ToolInterface
+from pydantic import BaseModel, ConfigDict
 
-class ensembl_rest_client(ToolInterface):
+class EnsemblTool(ToolInterface):
+    """Tool for querying the Ensembl REST API."""
     
-    name: str = "ensembl_rest_client"
+    name: str = "EnsemblTool"
     description: str = (
-        "Use this to get gene information from the Ensembl API. It will return details about the gene based on the given gene symbol or ID. "
-        "Input: a valid gene symbol or ID (e.g. BRCA1)"
+        "Use this tool to query Ensembl database for genomic information. "
+        "Input can be:\n"
+        "1. A variant ID (e.g., 'rs699')\n"
+        "2. A gene symbol (e.g., 'BRCA1')\n"
+        "Returns genomic coordinates, annotations, and variant information."
     )
-    server: str = 'http://rest.ensembl.org'
-        
-    reqs_per_sec: int = 15
-    req_count: int = 0
-    last_req: int = 0        
-        
-#     def __init__(self, server='http://rest.ensembl.org', reqs_per_sec=15):
-#         self.server = server
-#         self.reqs_per_sec = reqs_per_sec
-#         self.req_count = 0
-#         self.last_req = 0
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    base_url: str = 'https://rest.ensembl.org'
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._session = requests.Session()
+        self._session.headers.update({
+            'Content-Type': 'application/json',
+            'User-Agent': 'EnsemblClient/1.0'
+        })
 
-    def perform_rest_action(self, endpoint, hdrs=None, params=None):
-        if hdrs is None:
-            hdrs = {}
-
-        if 'Content-Type' not in hdrs:
-            hdrs['Content-Type'] = 'application/json'
-
-        if params:
-            endpoint += '?' + urlencode(params)
-
-        data = None
-
-        # check if we need to rate limit ourselves
-        if self.req_count >= self.reqs_per_sec:
-            delta = time.time() - self.last_req
-            if delta < 1:
-                time.sleep(1 - delta)
-            self.last_req = time.time()
-            self.req_count = 0
-        
+    def query_variant(self, variant_id: str) -> Dict[str, Any]:
+        """Query information about a specific variant."""
         try:
-            request = Request(self.server + endpoint, headers=hdrs)
-            response = urlopen(request)
-            content = response.read()
-            if content:
-                data = json.loads(content)
-            self.req_count += 1
-
-        except HTTPError as e:
-            # check if we are being rate limited by the server
-            if e.code == 429:
-                if 'Retry-After' in e.headers:
-                    retry = e.headers['Retry-After']
-                    time.sleep(float(retry))
-                    self.perform_rest_action(endpoint, hdrs, params)
-            else:
-                sys.stderr.write('Request failed for {0}: Status code: {1.code} Reason: {1.reason}\n'.format(endpoint, e))
-           
-        return data
-
-    def get_variants(self, species, symbol):
-        genes = self.perform_rest_action(
-            endpoint='/xrefs/symbol/{0}/{1}'.format(species, symbol), 
-            params={'object_type': 'gene'}
-        )
-        if genes:
-            stable_id = genes[0]['id']
-            variants = self.perform_rest_action(
-                '/overlap/id/{0}'.format(stable_id),
-                params={'feature': 'variation'}
-            )
-            return variants
-        return None
-
-    def use(self, input_text: str) -> dict:
-        """Fetches and formats gene information from the Ensemble API."""
-        
-#         datalist = input_text.split(",", 1) 
-#         print(datalist)
-
-        species = 'human' 
-        symbol = input_text.strip(); 
-#         species, symbol = input_text.split(",", 1) 
-#         species, symbol = species.strip(), symbol.strip()
-        
-        try:
-            variants = self.get_variants(species, symbol)
-            formatted_str = "Gene Information:\n"            
-            if variants:
-                for v in variants[:10]:
-                    formatted_str += '{seq_region_name}:{start}-{end}:{strand} ==> {id} ({consequence_type})'.format(**v)
-                return {"result": formatted_str}
-            else:
-                return {"result": "No information found for the given gene symbol or ID."}
+            url = f"{self.base_url}/variation/human/{variant_id}"
+            response = self._session.get(url)
+            response.raise_for_status()
+            return {"result": response.json()}
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Failed to query variant {variant_id}: {str(e)}"}
+
+    def query_gene(self, gene_symbol: str) -> Dict[str, Any]:
+        """Query information about a specific gene."""
+        try:
+            # First lookup gene ID
+            lookup_url = f"{self.base_url}/lookup/symbol/homo_sapiens/{gene_symbol}"
+            response = self._session.get(lookup_url)
+            response.raise_for_status()
+            gene_data = response.json()
+            
+            # Get detailed information
+            gene_id = gene_data.get('id')
+            if not gene_id:
+                return {"error": f"Gene {gene_symbol} not found"}
+                
+            detail_url = f"{self.base_url}/lookup/id/{gene_id}"
+            detail_response = self._session.get(detail_url)
+            detail_response.raise_for_status()
+            
+            return {"result": detail_response.json()}
+        except Exception as e:
+            return {"error": f"Failed to query gene {gene_symbol}: {str(e)}"}
+
+    def use(self, input_text: str) -> Dict[str, Any]:
+        """Main interface that handles both variant and gene queries."""
+        query = input_text.strip()
         
-        
-# def run(species, symbol):
-#     client = ensembl_rest_client()
-#     variants = client.get_variants(species, symbol)
-#     if variants:
-#         for v in variants:
-#             print('{seq_region_name}:{start}-{end}:{strand} ==> {id} ({consequence_type})'.format(**v))
+        if query.lower().startswith('rs'):
+            return self.query_variant(query)
+        else:
+            return self.query_gene(query)
+
+# For backward compatibility
+def ensembl_rest_client(server: str = "https://rest.ensembl.org"):
+    """Deprecated: Use EnsemblTool class instead."""
+    return EnsemblTool()
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3:
-        species, symbol = sys.argv[1:]
-    else:
-        species, symbol = 'human', 'BRAF'
-
-    client = ensembl_rest_client()
-    res = client.use(f"{species},{symbol}")
-#     res = client.use("human,BRAF")
-
-    print(res) 
+    tool = EnsemblTool()
+    
+    # Test variant query
+    variant_result = tool.use("rs699")
+    print("Variant query result:", variant_result)
+    
+    # Test gene query
+    gene_result = tool.use("BRCA1")
+    print("Gene query result:", gene_result) 

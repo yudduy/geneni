@@ -1,99 +1,96 @@
-# import openai
+"""
+This module implements the ChatLLM class which handles interactions with Google's Gemini Pro model
+with RAG (Retrieval Augmented Generation) capabilities for biological databases.
+
+Key components:
+- API key authentication
+- RAG implementation for biological database tools
+- Tool selection and response validation
+- Structured response formatting with citations
+"""
+
 import os
-
+import time
+from functools import wraps
 from pydantic import BaseModel
-from typing import List
-
-# taken from https://ai.google.dev/gemini-api/docs/get-started/python
-import pathlib
-import textwrap
-
+from typing import List, Dict, Any
 import google.generativeai as genai
+import json
 
-from IPython.display import display
-from IPython.display import Markdown
+def rate_limit(seconds=1):
+    """Decorator to implement rate limiting for API calls."""
+    def decorator(func):
+        last_called = [0]
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = time.time() - last_called[0]
+            if elapsed < seconds:
+                time.sleep(seconds - elapsed)
+            result = func(*args, **kwargs)
+            last_called[0] = time.time()
+            return result
+        return wrapper
+    return decorator
 
-try:
-    import vertexai
-    from vertexai.preview.generative_models import GenerativeModel, Part
-    from google.cloud.aiplatform_v1beta1.types import SafetySetting, HarmCategory
-    PROJECT_ID = 1
-    vertexai.init(project=PROJECT_ID, location="us-central1")
-except Exception as e:
-    print(e)
-    print("Could not load VertexAI API.")
-
-# Used to securely store your API key
-# from google.colab import userdata
-
-
-
-# modified from https://github.com/snap-stanford/MLAgentBench/blob/main/MLAgentBench/LLM.py#L117
 class ChatLLM(BaseModel):
-    model: str = 'GEMINI 1.5'
+    """Handles interactions with the Gemini Pro model with RAG capabilities."""
+    
+    model: str = 'gemini-pro'
     temperature: float = 0.0
-    # genai.api_key = os.environ["GOOGLE_API_KEY"]  # Credentials setup
-    
-    # Or use `os.getenv('GOOGLE_API_KEY')` to fetch an environment variable.
-    GOOGLE_API_KEY: str = os.getenv('GOOGLE_GENAI_API_KEY')
-    #genai.configure(api_key=GOOGLE_API_KEY)
-    
-    def to_markdown(text):
-        text = text.replace('•', '  *')
-        return Markdown(textwrap.indent(text, '> ', predicate=lambda _: True))
+    api_key: str = None
 
-    
-#    def generate(self, prompt: str, stop: List[str] = None):    
-#        model = genai.GenerativeModel('gemini-pro')
-#        response = model.generate_content(prompt)
+    def __init__(self, **data):
+        """Initialize the ChatLLM with API key."""
+        super().__init__(**data)
+        self.api_key = os.getenv('GOOGLE_API_KEY')
+        if not self.api_key:
+            raise ValueError("GOOGLE_API_KEY environment variable not set")
+            
+        genai.configure(api_key=self.api_key)
+        self.model = genai.GenerativeModel('gemini-pro')
+
+    def complete_text_gemini(self, prompt: str, stop: List[str] = None) -> str:
+        """Generate response using Gemini model."""
+        try:
+            response = self.model.generate_content(prompt)
+            if response and response.text:
+                return response.text.strip()
+            return "I apologize, but I couldn't generate a response. Please try rephrasing your question."
+        except Exception as e:
+            if "safety" in str(e).lower():
+                return "I apologize, but I cannot provide a response to that query due to safety constraints."
+            return f"An error occurred: {str(e)}"
+
+    def handle_conversation(self, prompt: str) -> str:
+        """Handle general conversation without RAG."""
+        try:
+            conversation_prompt = f"""You are a helpful and friendly AI assistant. 
+            Please respond naturally to: {prompt}
+
+            If the conversation could benefit from biological database information, 
+            suggest that to the user, but keep the current response conversational."""
+            
+            return self.complete_text_gemini(conversation_prompt)
+        except Exception as e:
+            return f"I apologize, but I'm having trouble responding. Error: {str(e)}"
+
+    def generate_with_tools(self, prompt: str, tool_responses: List[Dict[str, Any]]) -> str:
+        """Main interface for text generation with RAG."""
+        formatted_responses = [
+            f"\nSource [{resp['tool_name']}]: {json.dumps(resp['response'], indent=2)}"
+            for resp in tool_responses
+            if 'tool_name' in resp and 'response' in resp
+        ]
         
-#        reptext = response.text
-        #print("---------\n", response.text, "\n", "---------------")
-        
-#        return response.text
-        # return        
-        # self.to_markdown(reptext)
-        
-    #def complete_text_gemini(prompt, stop_sequences=[], model="gemini-pro", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, **kwargs):
-    def complete_text_gemini(self, prompt, stop_sequences=[], max_tokens_to_sample = 2000, temperature=0.5, log_file=None, **kwargs):
-        """ Call the gemini API to complete a prompt."""
-        # Load the model
-        model = genai.GenerativeModel("gemini-pro")
-        #model = GenerativeModel("gemini-pro")
-        # Query the model
-        parameters = {
-                "temperature": temperature,
-                "max_output_tokens": max_tokens_to_sample,
-                "stop_sequences": stop_sequences,
-                **kwargs
-            }
-        safety_settings = {
-                harm_category: SafetySetting.HarmBlockThreshold(SafetySetting.HarmBlockThreshold.BLOCK_NONE)
-                for harm_category in iter(HarmCategory)
-            }
-        safety_settings = {
-            }
-        response = model.generate_content( [prompt] , generation_config=parameters, safety_settings=safety_settings)
-        #print(f"prompt: {prompt}\n")
-        #print(f"[prompt]: {[prompt]}\n")        
-        #response = model.generate_content([prompt])
-        #print(response.text)
-        completion = response.text
-        if log_file is not None:
-            log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
-        return completion
-        
-# fix this line below, genai doesn't have "chat completion"
-        
-#         response = openai.ChatCompletion.create(
-#             model=self.model,
-#             messages=[{"role": "user", "content": prompt}],
-#             temperature=self.temperature,
-#             stop=stop
-#         )
-#        return response.choices[0].message.content
+        rag_prompt = self._create_rag_prompt(prompt, '\n'.join(formatted_responses))
+        return self.complete_text_gemini(rag_prompt)
 
 if __name__ == '__main__':
-    llm = ChatLLM()
-    result = llm.complete_text_gemini(prompt='Who is the president of the USA?')
-    print(result)
+    # Test the LLM
+    try:
+        llm = ChatLLM()
+        result = llm.complete_text_gemini(prompt='What is DNA?')
+        print("Test successful!")
+        print("Response:", result)
+    except Exception as e:
+        print("Test failed:", str(e))

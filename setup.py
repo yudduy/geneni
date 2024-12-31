@@ -1,12 +1,12 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='llm_agents',
+    name='geneni',
     version='0.1.0',
-    description='A package for building agents which use the OpenAI API to figure out actions to take and can use tools.',
-    author='Marc Päpper',
-    author_email='marc@paepper.com',
-    url='https://github.com/mpaepper/llm_agents',
+    description='AI agent for biological data',
+    author='Duy Nguyen',
+    author_email='duynguy@stanford.edu',
+    url='https://github.com/yudduy/geneni',
     packages=find_packages(),
     install_requires=[
         'google-search-results>=2.4.2',
@@ -16,6 +16,6 @@ setup(
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
-        'License :: OSI Approved :: MIT License'
+        'License :: Stanford University License'
     ],
 )

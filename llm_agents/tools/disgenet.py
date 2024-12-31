@@ -3,7 +3,7 @@ import time
 import requests
 from urllib.parse import urlencode
 from pydantic import BaseModel, Field
-from llm_agents.tools.base import ToolInterface
+from llm_agents.tools.toolinterface import ToolInterface
 
 class DisGeNETClient(ToolInterface):
     api_host: str = 'https://www.disgenet.org/api'
@@ -17,7 +17,7 @@ class DisGeNETClient(ToolInterface):
         super().__init__(name="disgenet_client", description=(
             "Use this to get variant-disease associations from the DisGeNET API. "
             "It will return details about the diseases associated with a given variant."
-        ))  # Initialize ToolInterface with required fields
+        ))  
         self.api_key = self.authenticate(email, password)
         self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
 

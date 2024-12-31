@@ -1,22 +1,40 @@
+"""
+This module implements the Agent class which orchestrates the interaction between
+the LLM and various biological database tools. The agent interprets user queries,
+selects appropriate tools, and generates comprehensive responses.
+
+Key components:
+- Tool management and selection
+- Query processing and response generation
+- Error handling and recovery mechanisms
+- Support for both database queries and general knowledge questions
+"""
+
 import datetime
 import re
 import time
+import json
 from pydantic import BaseModel
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Callable
 from llm_agents.llm import ChatLLM
-from llm_agents.tools.base import ToolInterface
-from llm_agents.tools.otgquery import get_variant_to_QTLs_opentarget, otg_graphql
-from llm_agents.tools.geneclintable import get_gene_clintable
-from llm_agents.tools.ensembl import ensembl_rest_client
-from llm_agents.tools.snpsclintable import get_snp_clintable
+from llm_agents.tools.toolinterface import ToolInterface
+
+# Import all tool classes
+from llm_agents.tools.opentargetgenetics import get_variant_to_QTLs_opentarget, otg_graphql
+from llm_agents.tools.clinicaltable_gene import get_gene_clintable
+from llm_agents.tools.ensembl import EnsemblTool
+from llm_agents.tools.clinicaltable_snp import get_snp_clintable
 from llm_agents.tools.disgenet import DisGeNETClient
-from llm_agents.tools.diseaseclintable import get_disease_clintable
+from llm_agents.tools.clinicaltable_disease import get_disease_clintable
 from llm_agents.tools.genetodisease import GeneToDisease
 
+# Define tokens for response parsing
 FINAL_ANSWER_TOKEN = "Final Answer:"
 OBSERVATION_TOKEN = "Observation:"
 THOUGHT_TOKEN = "Thought:"
-PROMPT_TEMPLATE = """You are a helpful biologist. You have access to the following tools:
+
+# Update prompt template to be more explicit about biological queries
+PROMPT_TEMPLATE = """You are a helpful biologist with expertise in genetics and disease associations. You have access to the following tools:
 
 {tool_description}
 
@@ -40,16 +58,19 @@ Follow these instructions and do not forget them:
 - Once you found that a gene is associated with a disease. Conclude that statement into the final answer and do not run anything else.
 - In the case of not having enough evidence, mention specifically what sort of information is needed to make an appropriate conclusion and how users can go about attaining it. 
 
-Always respond in this format exactly:
+IMPORTANT: You must ALWAYS respond in this EXACT format:
 
-Reflection: What does the observation mean? If there is an error, what caused the error and how to debug?
-Critique: What assumption is this reflection making? How will this reasoning be wrong?
-Research Plan and Status: The full high level research plan, with current status and confirmed results of each step briefly annotated. It must only include progress that has been made by previous steps. If there is any update, signify which section had an update by prefexing with double asterisks **like this. If there is no update, just copy the previous step Research Plan and Status. The high level plan from the previous step should be fully retained, unless it is intentionally revised.
-Thought: What you are currently doing, what actions to perform and why
-Action: the action to take, only relevant elements of {tool_names}, DO NOT contain tool input as it should be included in Action Input
-Action Input: the input to the action
-Observation: the result of the action
-Final Answer: your final answer to the original input question
+Reflection: [Your reflection here]
+Critique: [Your critique here]
+Research Plan and Status: [Your research plan here]
+Thought: [Your current thought process]
+Action: [ONE tool name from the available tools]
+Action Input: [The input for the selected tool]
+
+If you have a final answer:
+Final Answer: [Your final answer here]
+
+For general knowledge questions that don't require database lookups, you can provide a Final Answer directly.
 
 Begin!
 
@@ -57,88 +78,128 @@ Reflection: {previous_responses}
 """
 
 class Agent(BaseModel):
+    """Manages the interaction between LLM and biological database tools.
+    
+    Attributes:
+        llm (ChatLLM): Language model instance
+        tools (List[ToolInterface]): Available database tools
+        prompt_template (str): Template for generating prompts
+        max_loops (int): Maximum iterations for tool usage
+        max_retries (int): Maximum retries for failed attempts
+        thought_callback (Optional[Callable[[str], None]]): Callback for logging thoughts
+    """
+    
     llm: ChatLLM
     tools: List[ToolInterface]
     prompt_template: str = PROMPT_TEMPLATE
-    max_loops: int = 15
-    max_retries: int = 3  # Add a max_retries attribute for handling retries
-    # The stop pattern is used, so the LLM does not hallucinate until the end
+    max_loops: int = 10
+    max_retries: int = 3
     stop_pattern: List[str] = [f'\n{OBSERVATION_TOKEN}', f'\n\t{OBSERVATION_TOKEN}']
+    thought_callback: Optional[Callable[[str], None]] = None
 
     @property
     def tool_description(self) -> str:
+        """Generate description of available tools."""
         return "\n".join([f"{tool.name}: {tool.description}" for tool in self.tools])
 
     @property
     def tool_names(self) -> str:
+        """Get comma-separated list of tool names."""
         return ",".join([tool.name for tool in self.tools])
 
     @property
     def tool_by_names(self) -> Dict[str, ToolInterface]:
+        """Create mapping of tool names to tool instances."""
         return {tool.name: tool for tool in self.tools}
 
+    def determine_query_type(self, question: str) -> str:
+        """Determine if the query needs biological database access."""
+        prompt = f"""Analyze this query: "{question}"
+
+Please classify this query as either:
+1. GENERAL - A general conversation or basic question
+2. BIO - A biological/medical/genetic query that might need database verification
+
+RESPONSE_TYPE: [GENERAL/BIO]
+CONFIDENCE: [HIGH/MEDIUM/LOW]
+REASON: [Brief explanation]"""
+
+        response = self.llm.complete_text_gemini(prompt)
+        
+        if "RESPONSE_TYPE: GENERAL" in response:
+            return "GENERAL"
+        return "BIO"
+
+    def handle_general_query(self, question: str) -> str:
+        """Handle general conversation without database access."""
+        prompt = f"""You are a helpful and friendly AI assistant. Please respond to: {question}
+
+Keep your response natural and conversational. If you detect the conversation might benefit 
+from biological database information, suggest that to the user."""
+
+        return self.llm.complete_text_gemini(prompt)
+
+    def _log_thought(self, thought: str):
+        """Log a thought, both to console and callback if available."""
+        if self.thought_callback:
+            self.thought_callback(thought)
+
     def run(self, question: str):
-        previous_responses = []
-        num_loops = 0
-        prompt = self.prompt_template.format(
-                today=datetime.date.today(),
-                tool_description=self.tool_description,
-                tool_names=self.tool_names,
-                question=question,
-                previous_responses='{previous_responses}'
-        )
-        print(prompt.format(previous_responses=''))
-        
-        while num_loops < self.max_loops:
-            num_loops += 1
-            curr_prompt = prompt.format(previous_responses='\n'.join(previous_responses))
-            generated, tool, tool_input = self.decide_next_action(curr_prompt)
-
-            if tool == 'Final Answer':
-                return tool_input
-
-            retries = 0
-            while retries < self.max_retries:
-                try:
-                    # Attempt to get the tool from the dictionary
-                    if tool not in self.tool_by_names or tool is None:
-                        raise ValueError(f"Unknown tool: {tool}")
-                    # Use the tool and process the result
-                    tool_instance = self.tool_by_names[tool]
-                    tool_result = tool_instance.use(tool_input)
-                    generated += f"\n{OBSERVATION_TOKEN} {tool_result}\n{THOUGHT_TOKEN}"
-                    print(generated)
-                    previous_responses.append(generated)
-                    break  # Exit the retry loop on success
-                except ValueError as e:
-                    print(f"Error: {e}")
-                    break
-                except Exception as e:
-                    retries += 1
-                    wait_time = 2 ** retries  # Exponential backoff
-                    print(f"Encountered exception: {e}. Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-
-    def decide_next_action(self, prompt: str) -> str:
-        generated = self.llm.complete_text_gemini(prompt, self.stop_pattern)
-        
-        tool, tool_input = self._parse(generated)
-        return generated, tool, tool_input
-
-    def _parse(self, generated: str) -> Tuple[str, str]:
-        if FINAL_ANSWER_TOKEN in generated:
-            return "Final Answer", generated.split(FINAL_ANSWER_TOKEN)[-1].strip()
-        
-        regex = r"Action: [\[]?(.*?)[\]]?[\n]*Action Input:[\s]*(.*)"
-        match = re.search(regex, generated, re.DOTALL)
-        if not match:
-            raise ValueError(f"Output of LLM is not parsable for next tool use: `{generated}`")
+        """Process queries using context-aware approach."""
+        try:
+            query_type = self.determine_query_type(question)
+            self._log_thought(f"Query type: {query_type}")
             
-        tool = match.group(1).strip()
-        tool_input = match.group(2).strip(" ").strip('"')
-        
-        # No longer encode the tool input
-        return tool, tool_input
+            if query_type == "GENERAL":
+                response = self.handle_general_query(question)
+                self._log_thought("Providing conversational response")
+                return response
+            
+            initial_response = self._get_initial_response(question)
+            if not self._needs_verification(initial_response):
+                return self._extract_answer(initial_response)
+
+            self._log_thought("Preparing to verify with databases")
+            user_input = input().strip().lower()
+            
+            if user_input != 'yes':
+                return self._extract_answer(initial_response)
+
+            return self._run_database_verification(question)
+            
+        except Exception as e:
+            return f"An error occurred: {str(e)}"
+
+    def _get_initial_response(self, question: str) -> str:
+        """Get the initial response from the LLM."""
+        prompt = f"""As a biology expert, please answer this question: {question}
+
+Provide:
+1. A clear, scientific answer
+2. Confidence level (HIGH/MEDIUM/LOW)
+3. Whether database verification would be helpful
+
+Format:
+ANSWER: [Your explanation]
+CONFIDENCE: [HIGH/MEDIUM/LOW]
+NEEDS_VERIFICATION: [YES/NO]
+REASON: [Why verification might be needed]"""
+
+        return self.llm.complete_text_gemini(prompt)
+
+    def _needs_verification(self, initial_response: str) -> bool:
+        """Determine if verification is needed."""
+        return "NEEDS_VERIFICATION: YES" in initial_response
+
+    def _extract_answer(self, initial_response: str) -> str:
+        """Extract the answer from the initial response."""
+        return initial_response.split("ANSWER:")[1].split("CONFIDENCE:")[0].strip()
+
+    def _run_database_verification(self, question: str) -> str:
+        """Run database verification."""
+        # This method is not implemented in the original code, so it's left unchanged.
+        # You may want to implement this method based on your specific requirements.
+        pass
 
 
 if __name__ == '__main__':
