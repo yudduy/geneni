@@ -3,7 +3,11 @@ from llm_agents.llm import ChatLLM
 from llm_agents.tools.toolinterface import ToolInterface
 from llm_agents.tools.harmonizome import HarmonizomeTool
 from llm_agents.tools.ncbi import NCBITool
-from llm_agents.tools.opentargetgenetics import OpenTargetsGeneticsAPI, get_variant_to_QTLs_opentarget, otg_graphql
+from llm_agents.tools.opentargetgenetics import (
+    OpenTargetsGeneticsAPI,
+    get_variant_to_QTLs_opentarget,
+    otg_graphql
+)
 from llm_agents.tools.ensembl import EnsemblTool
 from llm_agents.tools.disgenet import DisGeNETClient
 from llm_agents.tools.genetodisease import GeneToDisease
