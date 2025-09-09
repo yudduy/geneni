@@ -56,7 +56,7 @@ export GEMINI_API_KEY='your_api_key_here'
 
 ## Contact
 
-For any questions or inquiries, please contact us at [duynguy@stanford.com](mailto:duynguy@stanford.com).
+For any questions or inquiries, please contact us at [duynguy@stanford.edu](mailto:duynguy@stanford.edu).
 
 ## Acknowledgments
 
